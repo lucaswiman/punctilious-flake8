@@ -1,4 +1,5 @@
 import ast
+import operator
 import typing
 
 __version__ = '0.0.01'
@@ -43,6 +44,15 @@ class Indeterminate(typing.NamedTuple):
 
 ValueDetermination = typing.Union[typing.Type[Indeterminate], bool]
 
+AST_OP_TO_OPERATOR = {
+    ast.Lt: operator.lt,
+    ast.Eq: operator.eq,
+    ast.Gt: operator.gt,
+    ast.GtE: lambda x, y: x >= y,
+    ast.LtE: lambda x, y: x <= y,
+    ast.NotEq: lambda x, y: x != y,
+}
+
 class PartialEvaluator(ast.NodeVisitor):
     @classmethod
     def is_deterministic(cls, node) -> bool:
@@ -86,17 +96,22 @@ class PartialEvaluator(ast.NodeVisitor):
             else:
                 # All values are truthy. The last one is returned as a value.
                 return values[-1]
-        elif isinstance(node.op, ast.Not):
-            [value] = values
-            if value == Indeterminate(truthy=None):
-                return value
-            elif isinstance(value, Indeterminate):
-                # Negation always returns a boolean value
-                return (not value.truthy)
-            else:
-                return not value
         else:  # TODO: verify this is exhaustive
             return Indeterminate(truthy=None)
+
+    def visit_UnaryOp(self, node):
+        op = node.op
+        operand = self.visit(node.operand)
+        if isinstance(node.op, ast.Not):
+            if operand == Indeterminate(truthy=None):
+                return operand
+            elif isinstance(operand, Indeterminate):
+                # Negation always returns a boolean value
+                return (not operand.truthy)
+            else:
+                return not operand
+        else:
+            breakpoint()
 
     def visit_Expr(self, node):
         """
@@ -114,8 +129,8 @@ class PartialEvaluator(ast.NodeVisitor):
         if isinstance(left, Indeterminate) or isinstance(comparator, Indeterminate):
             return Indeterminate(truthy=None)
         [op] = node.ops
-        if type(op) == ast.Eq:
-            return left == comparator
+        if type(op) in AST_OP_TO_OPERATOR:
+            return AST_OP_TO_OPERATOR[type(op)](left, comparator)
         elif type(op) == ast.In:
             try:
                 if left in comparator:
