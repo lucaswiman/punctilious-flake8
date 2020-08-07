@@ -33,6 +33,9 @@ def partial_eval(expr: str) -> Any:
 
 @pytest.mark.parametrize('statement', [
     'True',
+    'True is False',
+    'False is False',
+    'None',
     'True or False',
     'False or True',
     'True and False',
@@ -48,7 +51,11 @@ def partial_eval(expr: str) -> Any:
     '1 == 1 or a',
     '"foo"',
     'x == "foo" or "bar"',
+    '"foo" in "foobar"',
     '1 in (1,)',
+    '1 in [1]',
+    '1 in {1}',
+    '1 in {1: x}',
     '1 in (1, x)',
     '1 < 0',
     '1 <= 0',
@@ -62,12 +69,14 @@ def partial_eval(expr: str) -> Any:
     '1 != 1',
     '1 < 1',
     '1 > 1',
-    # '-(1 + 1)', # TODO
+    '-(1 + 1)',
+    '1 < 2 < 3',
 ])
 def test_deterministic(statement):
     assert check_deterministic(statement)
 
 @pytest.mark.parametrize('statement', [
+    'a',
     'not a',
     'a == 2',
     'True and a == 2',

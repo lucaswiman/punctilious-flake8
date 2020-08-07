@@ -17,32 +17,17 @@ def function(arg):
         pass
 
 
-# Walk the ast and evaluate if statements for whether their arguments are determined by literals.
-# Based off https://github.com/JBKahn/flake8-debugger/blob/master/flake8_debugger.py
-
-class TrivialIfFinder(ast.NodeVisitor):
-    def __init__(self):
-        super().__init__()
-        self.stupid_if_statements = []
-
-    # def visit(self, node):
-    #     breakpoint()
-    #     return super().visit(node)
-
-    def visit_If(self, node):
-        if DeterministicConstantStatement.is_deterministic(node.test):
-            self.stupid_if_statements.append(node)
-        breakpoint()
-
-
 class Indeterminate(typing.NamedTuple):
     # truthy is None => Indeterminate truth value
     # truthy is True => Indeterminate value, but will be truthy (e.g. ``a or True``)
     # truthy is False => Indeterminate value, but will be falsey (TODO: is this ever possible?).
     truthy: typing.Optional[bool]
-    
 
-ValueDetermination = typing.Union[typing.Type[Indeterminate], bool]
+def truthy(obj) -> typing.Optional[bool]:
+    if isinstance(obj, Indeterminate):
+        return obj.truthy
+    else:
+        return bool(obj)
 
 AST_OP_TO_OPERATOR = {
     ast.Lt: operator.lt,
@@ -51,7 +36,12 @@ AST_OP_TO_OPERATOR = {
     ast.GtE: lambda x, y: x >= y,
     ast.LtE: lambda x, y: x <= y,
     ast.NotEq: lambda x, y: x != y,
+    ast.Add: operator.add,
+    ast.USub: operator.neg,
 }
+
+class ISuckError(Exception):
+    pass
 
 class PartialEvaluator(ast.NodeVisitor):
     @classmethod
@@ -61,18 +51,11 @@ class PartialEvaluator(ast.NodeVisitor):
             return value.truthy is not None
         return True
 
-    # def visit(self, node) -> ValueDetermination:
-    #     ret = super().visit(node)
-    #     if ret is Indeterminate:
-    #         return False
-    #     else:
-    #         return True
-
     def generic_visit(self, node):
-        breakpoint()
+        return Indeterminate(truthy=None)
 
     def visit_BoolOp(self, node):
-        values: List[ValueDetermination] = {self.visit(child) for child in node.values}
+        values = {self.visit(child) for child in node.values}
         if isinstance(node.op, ast.Or):
             seen_indeterminate = False
             for value in values:
@@ -100,18 +83,23 @@ class PartialEvaluator(ast.NodeVisitor):
             return Indeterminate(truthy=None)
 
     def visit_UnaryOp(self, node):
-        op = node.op
+        op = type(node.op)
         operand = self.visit(node.operand)
-        if isinstance(node.op, ast.Not):
-            if operand == Indeterminate(truthy=None):
-                return operand
-            elif isinstance(operand, Indeterminate):
+        if operand == Indeterminate(truthy=None):
+            return operand
+        elif op == ast.Not:
+            if isinstance(operand, Indeterminate):
                 # Negation always returns a boolean value
                 return (not operand.truthy)
             else:
                 return not operand
+        elif op in AST_OP_TO_OPERATOR:
+            if isinstance(operand, Indeterminate):
+                return (not operand.truthy)
+            else:
+                return AST_OP_TO_OPERATOR[op](operand)
         else:
-            breakpoint()
+            return Indeterminate(truthy=None)
 
     def visit_Expr(self, node):
         """
@@ -123,26 +111,49 @@ class PartialEvaluator(ast.NodeVisitor):
         return node.value
 
     def visit_Compare(self, node):
-        left = self.visit(node.left)
-        # TODO: handle multiple comparators or ops
-        [comparator] = [self.visit(comparator) for comparator in node.comparators]
-        if isinstance(left, Indeterminate) or isinstance(comparator, Indeterminate):
-            return Indeterminate(truthy=None)
-        [op] = node.ops
-        if type(op) in AST_OP_TO_OPERATOR:
-            return AST_OP_TO_OPERATOR[type(op)](left, comparator)
-        elif type(op) == ast.In:
-            try:
-                if left in comparator:
-                    return True
-                elif any(isinstance(c, Indeterminate) for c in comparator):
-                    return Indeterminate(truthy=None)
+        comparators = [self.visit(comparator) for comparator in node.comparators]
+        objects = [self.visit(node.left), *comparators]
+        comparisons = zip(objects, objects[1:])
+        comparison_results = []
+        for ((left, right), op) in zip(comparisons, node.ops):
+            if isinstance(left, Indeterminate) or isinstance(right, Indeterminate):
+                comparison_results.append(Indeterminate(truthy=None))
+            elif type(op) in AST_OP_TO_OPERATOR:
+                comparison_results.append(AST_OP_TO_OPERATOR[type(op)](left, right))
+            elif type(op) == ast.In:
+                try:
+                    if left in right:
+                        comparison_results.append(True)
+                    elif any(isinstance(elem, Indeterminate) for elem in right):
+                        comparison_results.append(Indeterminate(truthy=None))
+                    else:
+                        comparison_results.append(False)
+                except Exception as e:
+                    comparison_results.append(Indeterminate(truthy=None))
+            elif type(op) == ast.Is:
+                if left in (True, False, None) and right in (True, False, None):
+                    comparison_results.append(left is right)
                 else:
-                    return False
-            except Exception as e:
-                return Indeterminate(truthy=None)
+                    comparison_results.append(Indeterminate(truthy=None))
+            else:
+                comparison_results.append(Indeterminate(truthy=None))
+        truth_results = {truthy(result) for result in comparison_results}
+        if False in truth_results:
+            return False
+        elif all(truth_results):
+            return True
         else:
-            breakpoint()
+            return Indeterminate(truthy=None)
+
+    def visit_BinOp(self, node):
+        vals = self.visit(node.left), self.visit(node.right)
+        if type(node.op) in AST_OP_TO_OPERATOR:
+            op = AST_OP_TO_OPERATOR[type(node.op)]
+            if any(isinstance(val, Indeterminate) for val in vals):
+                return Indeterminate(truthy=None)
+            else:
+                return op(*vals)
+        return Indeterminate(truthy=None)
 
     def visit_Num(self, node):
         return node.n
@@ -160,6 +171,33 @@ class PartialEvaluator(ast.NodeVisitor):
         # TODO: what is node.ctx?
         return tuple(self.visit(child) for child in node.elts)
 
+    def visit_List(self, node):
+        return [self.visit(child) for child in node.elts]
+
+    def visit_Set(self, node):
+        return {self.visit(child) for child in node.elts}
+
+    def visit_Dict(self, node):
+        return {self.visit(key): self.visit(value) for key, value in zip(node.keys, node.values)}
+
+
+# Walk the ast and evaluate if statements for whether their arguments are determined by literals.
+# Based off https://github.com/JBKahn/flake8-debugger/blob/master/flake8_debugger.py
+
+
+class TrivialIfFinder(ast.NodeVisitor):
+    def __init__(self):
+        super().__init__()
+        self.stupid_if_statements = []
+
+    # def visit(self, node):
+    #     breakpoint()
+    #     return super().visit(node)
+
+    def visit_If(self, node):
+        if PartialEvaluator.is_deterministic(node.test):
+            self.stupid_if_statements.append(node)
+
 
 class Plugin:
     name = "punctilious-flake8"
@@ -169,8 +207,22 @@ class Plugin:
         self.tree = tree
 
     def run(self):
-        if True:
-            args.append(self.tree)
-            with open('/tmp/punctilious-args.pkl', 'wb') as f:
-                f.write(pickle.dumps(args))
-        yield from []
+        finder = TrivialIfFinder()
+        try:
+            finder.visit(self.tree)
+        except ISuckError as e:
+            node = e.node
+            yield (
+                node.lineno,
+                node.col_offset,
+                "PNC200 I suck",
+                type(self),
+            )
+        else:
+            for node in finder.stupid_if_statements:
+                yield (
+                    node.lineno,
+                    node.col_offset,
+                    "PNC100 if statement always evaluates to the same value.",
+                    type(self),
+                )
