@@ -190,13 +190,12 @@ class TrivialIfFinder(ast.NodeVisitor):
         super().__init__()
         self.stupid_if_statements = []
 
-    # def visit(self, node):
-    #     breakpoint()
-    #     return super().visit(node)
 
     def visit_If(self, node):
         if PartialEvaluator.is_deterministic(node.test):
             self.stupid_if_statements.append(node)
+        for child in node.orelse + node.body:
+            self.visit(child)
 
 
 class Plugin:
